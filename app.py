@@ -8,8 +8,12 @@ import json
 import re
 import streamlit as st
 
+import langfuse
+
 from dotenv import load_dotenv
 load_dotenv()
+
+lf_client = langfuse.Client(api_key=os.getenv("LANGFUSE_API_KEY"))
 
 # Klucz OpenAI
 openai.api_key = os.getenv("OPENAI_API_KEY")
@@ -54,7 +58,13 @@ Zwróć tylko czysty JSON w formacie:
 {{"age": 32, "gender": 1, "pace_5k_seconds": 1680}}
 Jeśli czegoś brak, użyj null.
 """
-    # 1) Wywołanie LLM
+    # Zarejestruj event w Langfuse (prompt)
+    event = lf_client.log_event(
+        name="extract_features",
+        input={"prompt": prompt, "user_text": text},
+        metadata={}
+    )
+    
     data = {"age": None, "gender": None, "pace_5k_seconds": None}
     try:
         resp = openai.chat.completions.create(
@@ -63,18 +73,22 @@ Jeśli czegoś brak, użyj null.
             temperature=0
         )
         content = resp.choices[0].message.content.strip()
-
+        
         # --- OBETNIJ fences ```json ... ```
         content = re.sub(r"^```json\s*|\s*```$", "", content, flags=re.IGNORECASE).strip()
 
         data = json.loads(content)
+
+        # Zarejestruj odpowiedź w Langfuse
+        event.log_output({"response": content})
+
     except Exception as e:
         st.error(f"Błąd parsowania LLM: {e}")
-        # Pokaż surową odpowiedź, jeśli była
         raw = locals().get("content", "(brak odpowiedzi)")
         st.write("Odpowiedź LLM (niesparsowana):", raw)
+        event.log_output({"error": str(e), "raw_response": raw})
 
-    # 2) Fallback: płeć — rozszerzone o "facet"/"kobieta"
+    # Fallbacky
     if data.get("gender") is None:
         txt = text.lower()
         if re.search(r'\b(facet|mężczyzna|male|m)\b', txt):
@@ -82,13 +96,11 @@ Jeśli czegoś brak, użyj null.
         elif re.search(r'\b(kobieta|female|k)\b', txt):
             data["gender"] = 1
 
-    # 3) Fallback: wiek
     if data.get("age") is None:
         m = re.search(r'(\d{1,3})\s*lat', text.lower())
         if m:
             data["age"] = int(m.group(1))
 
-    # 4) Fallback: tempo na 5 km (km/h → pace)
     if data.get("pace_5k_seconds") is None:
         m = re.search(r'(\d+(?:[\.,]\d+)?)\s*km\s*(?:h|na godzin)', text.lower())
         if m:
