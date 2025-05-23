@@ -4,3 +4,4 @@ python-dotenv
 openai
 scikit-learn
 joblib
+langfuse
